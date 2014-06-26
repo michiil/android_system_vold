@@ -51,17 +51,41 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
               rec->mount_point);
     }
 
-    char mount[PATH_MAX];
+    char mount_media[PATH_MAX];
+    char mount_fuse[PATH_MAX];
+    char switchable[PROPERTY_VALUE_MAX];
 
 #ifdef MINIVOLD
     // In recovery, directly mount to /storage/* since we have no fuse daemon
-    snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
-    mMountpoint = mFuseMountpoint = strdup(mount);
+    snprintf(mount_fuse, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
+    mMountpoint = mFuseMountpoint = strdup(mount_fuse);
 #else
-    snprintf(mount, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, rec->label);
-    mMountpoint = strdup(mount);
-    snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
-    mFuseMountpoint = strdup(mount);
+    snprintf(mount_media, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, rec->label);
+    snprintf(mount_fuse, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
+
+    property_get("persist.sys.vold.switchexternal", switchable, "0");
+    if (!strcmp(switchable,"1")) {
+        char *first, *second = NULL;
+        const char *delim = ",";
+
+        property_get("persist.sys.vold.switchablepair", switchable, "");
+        if (!(first = strtok(switchable, delim))) {
+            SLOGE("Mount switch requested, but no switchable mountpoints found");
+        } else if (!(second = strtok(NULL, delim))) {
+            SLOGE("Mount switch requested, but bad switchable mountpoints found");
+        } else {
+            if (!strcmp(rec->label,first)) {
+                snprintf(mount_media, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, second);
+                snprintf(mount_fuse, PATH_MAX, "%s/%s", Volume::FUSE_DIR, second);
+            } else if (!strcmp(rec->label,second)) {
+                snprintf(mount_media, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, first);
+                snprintf(mount_fuse, PATH_MAX, "%s/%s", Volume::FUSE_DIR, first);
+            }
+        }
+    }
+
+    mMountpoint = strdup(mount_media);
+    mFuseMountpoint = strdup(mount_fuse);
 #endif
 
     setState(Volume::State_NoMedia);
@@ -191,7 +215,9 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv::diskIns - No partitions - good to go son!");
 #endif
-        setState(Volume::State_Idle);
+        // Do not leave idle state if already in (avoids warnings)
+        if (getState() != Volume::State_Idle)
+            setState(Volume::State_Idle);
     } else {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv::diskIns - waiting for %d partitions (mask 0x%x)",
@@ -228,13 +254,16 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     }
 
     if (major != mDiskMajor) {
-        SLOGE("Partition '%s' has a different major than its disk!", devpath);
 #ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
         ValuePair vp;
         vp.major = major;
         vp.part_num = part_num;
         badPartitions.push_back(vp);
-#else
+        // Errors with internal volume are expected, so do not show them
+        if(strcmp(getLabel(), VOLD_INTERNAL_VOLUME))
+#endif
+        SLOGE("Partition '%s' of '%s' has a different major than its disk!", devpath, getLabel());
+#ifndef VOLD_DISC_HAS_MULTIPLE_MAJORS
         return;
 #endif
     }

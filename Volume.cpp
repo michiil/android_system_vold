@@ -236,7 +236,7 @@ void Volume::setState(int state) {
     int oldState = mState;
 
     if (oldState == state) {
-        SLOGW("Duplicate state (%d)\n", state);
+        SLOGW("Volume %s: Duplicate state (%d)\n", mLabel, state);
         return;
     }
 
@@ -268,8 +268,9 @@ int Volume::createDeviceNode(const char *path, int major, int minor) {
     return 0;
 }
 
-int Volume::formatVol(bool wipe) {
-    const char* fstype = NULL;
+int Volume::formatVol(bool wipe, const char* fstype) {
+
+    char* fstype2 = NULL;
 
     if (getState() == Volume::State_NoMedia) {
         errno = ENODEV;
@@ -320,10 +321,22 @@ int Volume::formatVol(bool wipe) {
     sprintf(devicePath, "/dev/block/vold/%d:%d", MAJOR(deviceNodes), MINOR(deviceNodes));
 #endif
 
-    if (mDebug) {
-        SLOGI("Formatting volume %s (%s)", getLabel(), devicePath);
+    if (fstype == NULL) {
+        fstype2 = getFsType((const char*)devicePath);
+    } else {
+        fstype2 = strdup(fstype);
     }
 
+    if (mDebug) {
+        SLOGI("Formatting volume %s (%s) as %s", getLabel(), devicePath, fstype2);
+    }
+
+    /* If the device has no filesystem, let's default to vfat.
+     * A NULL fstype2 will cause a MAPERR in the format
+     * switch below */
+    if (fstype2 == NULL) {
+        fstype2 = strdup("vfat");
+    }
 
     if (strcmp(fstype2, "f2fs") == 0) {
         ret = F2FS::format(devicePath);
@@ -336,16 +349,12 @@ int Volume::formatVol(bool wipe) {
     } else {
         ret = Fat::format(devicePath, 0, wipe);
     }
-    if (strcmp(fstype, "exfat") == 0) {
-        if (Exfat::format(devicePath)) {
-            SLOGE("Failed for format (%s) as exfat", strerror(errno));
-        }
-    } else if (Fat::format(devicePath, 0, wipe)) {
+
+    if (ret < 0) {
         SLOGE("Failed to format (%s)", strerror(errno));
-        goto err;
     }
 
-    ret = 0;
+    free(fstype2);
 
 err:
     setState(Volume::State_Idle);
@@ -379,7 +388,7 @@ bool Volume::isMountpointMounted(const char *path) {
 
 int Volume::mountVol() {
     dev_t deviceNodes[4];
-    int n, i, rc = 0;
+    int n, i = 0;
     char errmsg[255];
 
     int flags = getFlags();
@@ -491,7 +500,6 @@ int Volume::mountVol() {
         setState(Volume::State_Checking);
 
         errno = 0;
-        int gid;
 
         fstype = getFsType((const char *)devicePath);
 
@@ -564,7 +572,7 @@ int Volume::mountVol() {
                 }
 
                 if (Exfat::doMount(devicePath, getMountpoint(), false, false, false,
-                        AID_MEDIA_RW, AID_MEDIA_RW, 0007,true)) {
+                        AID_MEDIA_RW, AID_MEDIA_RW, 0007)) {
                     SLOGE("%s failed to mount via EXFAT (%s)\n", devicePath, strerror(errno));
                     continue;
                 }
@@ -677,8 +685,6 @@ int Volume::doUnmount(const char *path, bool force) {
 }
 
 int Volume::unmountVol(bool force, bool revert) {
-    int i, rc;
-
     int flags = getFlags();
     bool providesAsec = (flags & VOL_PROVIDES_ASEC) != 0;
     bool externalApps = (flags & VOL_EXTERNAL_APPS) != 0 && isExternalAppsEnabled();
